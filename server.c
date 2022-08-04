@@ -1,3 +1,10 @@
+/*
+compile with:
+gcc -Wall -g -ljson-c -lcrypt -lasound -pthread server.c -o server
+
+run with valgrind to check "LEAK SUMMARY"
+valgrind --tool=memcheck --leak-check=full -v ./server 9999
+*/
 #define  _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,7 +17,7 @@
 #include <netinet/in.h>
 
 #include <alsa/asoundlib.h>
-
+#include <pthread.h>
 #include <json-c/json.h>
 
 /*
@@ -52,10 +59,19 @@ char* getLoadAVG()
 }
 
 //set and retrive system volume level requires asoundlib.h
-int setVolume(struct json_object *jobj, char result[])
+//void *setVolume(struct json_object *jobj, char result[])
+struct factory{                    
+    char buff[3];
+    struct json_object *obj;
+
+};  
+struct factory assembly;
+struct factory eassembly;
+void * setVolume(void *param)
 {
     //get volume change direction from json
-    char *direction=(char *) json_object_get_string(json_object_object_get(jobj,"direction"));
+    struct factory *assembly = param;
+    char *direction=(char *) json_object_get_string(json_object_object_get(assembly->obj,"direction"));
 /////////////////
     int ret = 0;
     snd_mixer_t* handle;
@@ -121,8 +137,11 @@ int setVolume(struct json_object *jobj, char result[])
 
     snprintf (useradd_cmd, 3, "%li", (char*)get_vol);
     //return volume to var from input
-    strcat(result,useradd_cmd);
+   // strcat(result,useradd_cmd);
+   
+    strcat(assembly->buff,useradd_cmd);
 
+    free(mix_name);
     return 0;
 ////////////////
 }
@@ -157,9 +176,10 @@ char* getUser()
         {
             fread (buffer, 1, length, f);
         }
+    
         fclose (f);
     }
-
+   // free(buffer);
     return buffer;
 }
 
@@ -169,7 +189,7 @@ int userAdd(struct json_object *jobj)
     //printf("%s\n",crypt("pass","$6$salt"));
     /*
         We need appropriate salt, it could look like $6$salt$
-        In /etc/shadow salt is part od string with password starting $*$*$
+        In /etc/shadow salt is part of string with password starting $*$*$
         Check description for /etc/shadow
     */
 
@@ -226,7 +246,8 @@ char* repleace(char *subject, char *find, char *new)
     strncpy(end,subject+dposfound+len_find,len_subject-dposfound-len_find);
 
     snprintf (result, strlen(start)+strlen(new)+strlen(end)+1, "%s%s%s", start, new, end);
-
+    free(start);
+    free(end);
     return result;
 }
 
@@ -274,11 +295,11 @@ void createVirtualHost(struct json_object *jobj)
     system("/etc/init.d/apache2 restart");
 ///
 }
+//////////////
 
 int main(int argc, char *argv[])
 {
 
-//
     int sockfd, newsockfd, portno;
 //
     struct json_object *jobj;
@@ -320,6 +341,10 @@ int main(int argc, char *argv[])
 //
         jobj = json_tokener_parse(buffer);
 
+        pthread_t thread_id;
+        assembly.obj =jobj;
+
+
         if(json_object_get_type(jobj)==4)
         {
             char *action=(char *) json_object_get_string(json_object_object_get(jobj,"action"));
@@ -327,6 +352,7 @@ int main(int argc, char *argv[])
             if(strcmp(action,"addhost")==0)
             {
                 createVirtualHost(jobj);
+                //pthread_create(&thread_id, NULL, createVirtualHost(jobj), NULL);
             }
             else if(strcmp(action,"useradd")==0)
             {
@@ -335,26 +361,37 @@ int main(int argc, char *argv[])
             else if(strcmp(action,"getuser")==0)
             {
                 char *buff=getUser(jobj);
-                write(newsockfd,buff,strlen(getUser(jobj)));
+                
+                write(newsockfd,buff,strlen(buff));
+                //free buffer = malloc (length); from getUser
+                free(buff);
             }
             else if(strcmp(action,"avg")==0)
             {
-                n = write(newsockfd,getLoadAVG(jobj),256);
+                char *buff=getLoadAVG(jobj);
+                n = write(newsockfd,buff,strlen(buff));
+
             }
             else if(strcmp(action,"setvolume")==0)
             {
-                char buff[3];
-                setVolume(jobj,buff);
-                n = write(newsockfd,buff,strlen(buff));
+                //printf("SET VOLUME \n");
+                pthread_create(&thread_id, NULL, setVolume,  &assembly);
+                pthread_join(thread_id, NULL);
+                n = write(newsockfd, assembly.buff,strlen(assembly.buff));
+
+                assembly=eassembly;
             }
             else
             {
                 printf("ELSE %s \n",action);
             }
+            
         }
-//
-         n = write(newsockfd,"OK",2);
-         if (n < 0) error("ERROR");
+
+        free(jobj);
+
+        n = write(newsockfd,"OK",2);
+        if (n < 0) error("ERROR");
     }
     close(newsockfd);
     close(sockfd);
